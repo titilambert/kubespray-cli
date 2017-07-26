@@ -113,7 +113,6 @@ class CfgInventory(object):
                              {'hostname': 'kube-master', 'hostvars': []}
                              ]},
                          }
-
         if self.platform == 'openstack':
             if self.options['floating_ip']:
                 ip_type = 'public_v4'
@@ -150,7 +149,47 @@ class CfgInventory(object):
             elif etcds and len(etcds) < 3:
                 etcds = [etcds[0]]
 
-        if self.platform in ['aws', 'gce', 'openstack']:
+        if self.platform == 'terraform':
+            if self.options['add_node']:
+                current_inventory = self.read_inventory()
+                cluster_name = '-'.join(
+                    current_inventory['all']['hosts'][0]['hostname'].split('-')[:-1]
+                )
+                new_inventory = current_inventory
+            else:
+                cluster_name = 'k8s-' + get_cluster_name()
+
+            for host in nodes + masters + etcds:
+                tmp_dict = {'hostname': '%s' % host['name'],
+                            'hostvars': [{'name': 'ansible_ssh_host',
+                                          'value': host['ansible_ssh_host']}]
+                           }
+                # TODO handle windows nodes. Add windows specific attributues
+                attrs = ['ansible_ssh_user']
+                for attr in attrs:
+                    if host.get(attr):
+                        tmp_dict['hostvars'].append({'name': 'ansible_ssh_user',
+                                                     'value': host['ansible_ssh_user']})
+                new_inventory['all']['hosts'].append(tmp_dict)
+
+            if not self.options['add_node']:
+                for host in nodes:
+                    new_inventory['kube-node']['hosts'].append(
+                        {'hostname': '%s' % host['name'],
+                         'hostvars': []}
+                    )
+                for host in masters:
+                    new_inventory['kube-master']['hosts'].append(
+                        {'hostname': '%s' % host['name'],
+                         'hostvars': []}
+                    )
+                for host in etcds:
+                    new_inventory['etcd']['hosts'].append(
+                        {'hostname': '%s' % host['name'],
+                         'hostvars': []}
+                    )
+
+        elif self.platform in ['aws', 'gce', 'openstack']:
             if self.options['add_node']:
                 current_inventory = self.read_inventory()
                 cluster_name = '-'.join(

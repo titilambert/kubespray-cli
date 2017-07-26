@@ -106,7 +106,7 @@ def get_cluster_name():
 
 
 def clone_kubespray_git_repo(options):
-    if not options['add_node']:
+    if not options.get('add_node', False):
         if (os.path.isdir(options['kubespray_path']) and not options['assume_yes']
                 and not options['noclone']):
             display.warning(

@@ -13,7 +13,11 @@ requirements = [
     'markupsafe>=0.23',
     'pyasn1>=0.1.8',
     'boto>=2.40.0',
-    'apache-libcloud>=0.20.1'
+    'apache-libcloud>=0.20.1',
+]
+dependency_links = [
+#    'git+https://github.com/mantl/terraform.py.git#egg=ati',
+    'git+https://github.com/titilambert/terraform.py.git#egg=ati',
 ]
 
 test_requirements = [
@@ -39,6 +43,7 @@ setup(
     package_dir={'': 'src'},
     package_data={'kubespray': ['files/*.yml'], },
     install_requires=requirements,
+    dependency_links=dependency_links,
     license="GPLv3",
     zip_safe=False,
     keywords='kubespray',

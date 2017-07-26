@@ -25,8 +25,16 @@ Run Instances on cloud providers and generate inventory
 
 import sys
 import os
+import re
+import subprocess
 import yaml
 import json
+import zipfile
+
+import requests
+from ati.terraform import tfstates, iter_states, iterresources
+
+
 from kubespray.inventory import CfgInventory
 from kubespray.common import get_logger, query_yes_no, run_command, which, id_generator, get_cluster_name
 from ansible.utils.display import Display
@@ -397,3 +405,194 @@ class OpenStack(Cloud):
                 )
         self.write_local_inventory()
         self.write_playbook()
+
+
+class Terraform(Cloud):
+    TERRAFORM_DOWNLOAD_URL = "https://releases.hashicorp.com/terraform/{version}/terraform_{version}_linux_amd64.zip"
+    TERRAFORM_VERSION_RE = re.compile(r"Terraform v(?P<version>\d\.\d\.\d)")
+
+    def __init__(self, options):
+        Cloud.__init__(self, options, "terraform")
+        self.options = options
+        self.path = options.get("tf_binary_folder")
+        self.binary = "terraform"
+        self.proxy = options.get("http_proxy", "")
+        self.conf_path = options.get("tf_plan_folder")
+
+    @property
+    def version(self):
+        terraform = os.path.join(self.path, self.binary)
+        raw_version = subprocess.check_output([terraform, '--version'])
+        m = re.match(self.TERRAFORM_VERSION_RE, raw_version)
+        return m.group('version')
+
+    @property
+    def _config_env(self):
+        """Return the subprocess env-compatible list from config_file"""
+        config_env = {}
+        for key, value in self.options.get('tf_vars', {}).iteritems():
+            terra_key = 'TF_VAR_{}'.format(key)
+            config_env[terra_key] = str(value)
+
+        return config_env
+
+    def _update(self, version):
+        def _download(url):
+            return requests.get(url, proxies=self.proxy).content
+
+        filepath = os.path.join(self.path, self.binary)
+
+        # Is there a need to update?
+        if os.path.isfile(filepath):
+            if self.version == version:
+                self.logger.info('Terraform v{} up to date'.format(version))
+                return None
+
+        self.logger.info('Downloading terraform v{}...'.format(version))
+
+        terraform_url = self.TERRAFORM_DOWNLOAD_URL.format(version=version)
+        zippath = os.path.join(self.path, ''.join((self.binary, '.zip')))
+
+        try:
+            os.mkdir(self.path)
+        except OSError:
+            # Directory already exist.
+            pass
+
+        with open(zippath, 'w+') as file:
+            file.write(_download(terraform_url))
+
+        with zipfile.ZipFile(zippath, 'r') as zfile:
+            zfile.extractall(os.path.join(self.path))
+
+        os.chmod(os.path.join(self.path, self.binary), 0755)
+        os.remove(zippath)
+
+
+    def prepare(self):
+        # TODO Get tf files
+        self._update(self.options.get("tf_version"))
+
+    def _get(self, conf_path):
+        terraform = os.path.join(self.path, self.binary)
+        subprocess.check_call([
+            terraform,
+            'get',
+            conf_path
+        ], cwd=self.path)
+
+    def plan_instances(self):
+        """The conf_path must include:
+
+        ::
+
+            ssh_keys/ansible.pub
+            infra/*.tf
+
+        :param conf_path: The path leading to ssh_keys/ and infra/
+        :return:
+        """
+        terraform = os.path.join(self.path, self.binary)
+        self._get(self.conf_path)
+
+        subprocess.check_call([
+            terraform,
+            'plan',
+            '-state={}'.format(os.path.join(self.options.get("tf_state_folder"), 'terraform.tfstate')),
+            self.conf_path,
+        ], env=self._config_env, cwd=self.path)
+
+    def create_instances(self):
+        '''Run ansible-playbook for instances creation'''
+        self._update(self.options.get("tf_version"))
+        # TODO
+        # TERRAFORM
+        terraform = os.path.join(self.path, self.binary)
+        self._get(self.options.get('tf_plan_folder'))
+
+        # Little protection against Microsoft errors.
+        for _ in xrange(5):
+            retval = subprocess.call([
+                terraform,
+                'apply',
+                '-state={}'.format(os.path.join(self.options.get("tf_state_folder"), 'terraform.tfstate')),
+                os.path.join(self.options.get('tf_plan_folder')),
+            ], env=self._config_env, cwd=self.path)
+
+            if retval == 0:
+                break
+
+        # Compatibility with other functions.
+        if retval != 0:
+            raise subprocess.CalledProcessError(retval, terraform)
+
+
+    def plan_destroy_instances(self):
+        terraform = os.path.join(self.path, self.binary)
+        self._get(self.options.get('tf_plan_folder'))
+
+        # Little protection against retryable errors.
+        for _ in xrange(5):
+            retval = subprocess.call([
+                terraform,
+                'plan',
+                '-destroy',
+                '-state={}'.format(os.path.join(self.options.get("tf_state_folder"), 'terraform.tfstate')),
+                os.path.join(self.options.get('tf_plan_folder')),
+            ],
+                env=self._config_env,
+                stderr=subprocess.STDOUT,
+                cwd=self.path)
+
+            if retval == 0:
+                break
+
+    def destroy_instances(self):
+        terraform = os.path.join(self.path, self.binary)
+        self._get(self.options.get('tf_plan_folder'))
+
+        # Little protection against retryable errors.
+        for _ in xrange(5):
+            retval = subprocess.call([
+                terraform,
+                'destroy',
+                '-state={}'.format(os.path.join(self.options.get("tf_state_folder"), 'terraform.tfstate')),
+                '-force',
+                os.path.join(self.options.get('tf_plan_folder')),
+            ],
+                env=self._config_env,
+                stderr=subprocess.STDOUT,
+                cwd=self.path)
+
+            if retval == 0:
+                break
+
+        # Compatibility with other functions.
+        if retval != 0:
+            raise subprocess.CalledProcessError(retval, terraform)
+
+    def write_inventory(self):
+        '''Generate the inventory according the instances created'''
+        from ati.terraform import tfstates, iter_states, iterresources, iterhosts
+        hosts = iterhosts(iterresources(tfstates(self.options.get("tf_state_folder"))), None)
+
+
+        self.instances['masters']['json'] = []
+        self.instances['nodes']['json'] = []
+        self.instances['etcds']['json'] = []
+        for host in hosts:
+            hostname = host[0]
+            attrs = host[1]
+            tags = host[2]
+            for tag in tags:
+                if tag == 'role=kube-master':
+                    self.instances['masters']['json'].append(attrs)
+                if tag == 'role=kube-node':
+                    self.instances['nodes']['json'].append(attrs)
+        # TODO handle add node
+        self.options['add_node'] = None
+        # TODO handle etcds == masters
+        if self.instances['etcds']['json'] == []:
+            self.instances['etcds']['json'] = self.instances['masters']['json']
+        self.Cfg.write_inventory(self.instances['masters']['json'], self.instances['nodes']['json'], self.instances['etcds']['json'])
+

@@ -29,7 +29,7 @@ from kubespray.common import clone_kubespray_git_repo
 from kubespray.configure import Config
 from kubespray.inventory import CfgInventory
 from kubespray.deploy import RunPlaybook
-from kubespray.cloud import AWS, GCE, OpenStack
+from kubespray.cloud import AWS, GCE, OpenStack, Terraform
 display = Display()
 
 
@@ -65,6 +65,24 @@ def openstack(options):
     O.gen_openstack_playbook()
     O.create_instances()
     O.write_inventory()
+
+
+def terraform(options):
+    clone_kubespray_git_repo(options)
+    T = Terraform(options)
+    T.prepare()
+    if options.get('terraform_command') == 'plan':
+        T.plan_instances()
+    elif options.get('terraform_command') == 'apply':
+        T.plan_instances()
+        T.create_instances()
+        T.write_inventory()
+    elif options.get('terraform_command') == 'plan-destroy':
+        T.plan_destroy_instances()
+    elif options.get('terraform_command') == 'destroy':
+        T.plan_destroy_instances()
+        T.destroy_instances()
+        T.write_inventory()
 
 
 def deploy(options):
@@ -330,6 +348,58 @@ if __name__ == '__main__':
         '--cluster-name', dest='cluster_name', help='Name of the cluster'
     )
     openstack_parser.set_defaults(func=openstack)
+
+    # terraform
+    terraform_parser = subparsers.add_parser(
+        'terraform', parents=[parent_parser, firststep_parser],
+        help='Create VMs using Terraform and generate inventory',
+    )
+    terraform_parser.add_argument(
+        '--tf_version', dest='tf_version',
+        help='Terraform version'
+    )
+    terraform_parser.add_argument(
+        '--tf_plan_folder', dest='tf_plan_folder',
+        help='Terraform plan folder'
+    )
+    terraform_parser.add_argument(
+        '--tf_state_folder', dest='tf_state_folder',
+        help='Terraform state folder'
+    )
+    terraform_parser.add_argument(
+        '--tf_binary_folder', dest='tf_binary_folder',
+        help='Terraform binary path'
+    )
+    terraform_parser.add_argument(
+        '--cluster-name', dest='cluster_name', help='Name of the cluster'
+    )
+    terraform_parser.add_argument(
+        '--tf_vars', dest='tf_vars', help='List of Terraform vars', nargs="+", metavar="TF_VAR"
+    )
+    terraform_subparsers = terraform_parser.add_subparsers(help='terraform commands', dest='terraform_command')
+    terraform_subparsers.add_parser(
+        'plan',
+        help='Run terraform plan',
+        conflict_handler='resolve',
+    )
+    terraform_subparsers.add_parser(
+        'apply',
+        help='Run terraform apply',
+        conflict_handler='resolve',
+    )
+    terraform_subparsers.add_parser(
+        'plan-destroy',
+        help='Run terraform plan -destroy',
+        conflict_handler='resolve',
+    )
+    terraform_subparsers.add_parser(
+        'destroy',
+        help='Run terraform destroy',
+        conflict_handler='resolve',
+    )
+    #terraform_parser.add_argument('--add', dest='add_node', action='store_true',
+    #    help="Add node to an existing cluster")
+    terraform_parser.set_defaults(func=terraform)
 
     # deploy
     deploy_parser = subparsers.add_parser(
